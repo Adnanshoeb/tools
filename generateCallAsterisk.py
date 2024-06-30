@@ -1,52 +1,113 @@
 import socket
 import time
 
-# AMI credentials
 AMI_HOST = '127.0.0.1'
-AMI_PORT = 5038  # Default AMI port
-AMI_USERNAME = 'XXXXX'
-AMI_PASSWORD = 'i&XXXX#8S'
+AMI_PORT = 5038  
+AMI_USERNAME = 'XXXX'
+AMI_PASSWORD = 'XXXX'
 
-# Destination DID
-DID_TO_CALL = 'XXXX'
+DID_TO_CALL = '0XXXX90'
 
-# Event to track (e.g., "Newstate" for call state changes)
-EVENT_TO_TRACK = 'Newstate'
+EVENT_TO_TRACK = 'Newstate'  
 
-# Log file to store wait times
 LOG_FILE = 'wait_time_log.txt'
 
-# Create a socket connection to the AMI
-ami_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-ami_socket.connect((AMI_HOST, AMI_PORT))
 
-def send_command(command):
-    ami_socket.send(command.encode())
+def send_command(ami_socket, command):
+    try:
+        ami_socket.sendall(command.encode())
+        response = ami_socket.recv(4096).decode()
+        print(f"Command response: {response}")
+        return response
+    except (OSError, socket.error) as e:
+        print(f"Error sending command: {e}")
+        return None
 
-def originate_call(did):
-    originate_cmd = "Action: Originate\r\nChannel: SIP/Aarenet/{}\r\nExten: XXXXX\r\nContext: extension-context-ASTERISK_SIP-10\r\nPriority: 1\r\nCallerid: CXXXX\r\nTimeout: 30000\r\n\r\n".format(did)
-    send_command(originate_cmd)
 
-# Log in to the AMI
-login_command = "Action: Login\r\nUsername: {}\r\nSecret: {}\r\n\r\n".format(AMI_USERNAME, AMI_PASSWORD)
-send_command(login_command)
+def get_active_calls_count(ami_socket):
+    active_calls_cmd = "Action: CoreShowChannels\r\n\r\n"
+    response = send_command(ami_socket, active_calls_cmd)
+    if response is None or "Response: Error" in response:
+        print(f"Error retrieving active calls: {response}")
+        return None
+    print(f"Active calls response: {response}")
+    active_calls_count = response.count("Channel:")
+    print(f"Number of active calls: {active_calls_count}")
+    return active_calls_count
 
-# Originate a call
-originate_call(DID_TO_CALL)
 
-# Subscribe to events
-subscribe_command = "Action: Waitevent\r\nEventmask: {}\r\n\r\n".format(EVENT_TO_TRACK)
-send_command(subscribe_command)
+def originate_call(did, ami_socket):
+    originate_cmd = (
+        "Action: Originate\r\n"
+        "Channel: SIP/03XXXX90@SIPNETR/{}\r\n"
+        "Exten: 0XXXXX91\r\n"
+        "Context: extension-context-ASTERISK_SIP-10\r\n"
+        "Priority: 1\r\n"
+        "Callerid: XXXX90\r\n"
+        "Timeout: 6000\r\n"
+        "Async: true\r\n"
+        "\r\n".format(did)
+    )
 
-# Monitor events
-while True:
-    response = ami_socket.recv(4096).decode()
-    if EVENT_TO_TRACK in response and DID_TO_CALL in response:
-        event_time = time.strftime('%Y-%m-%d %H:%M:%S')
-        with open(LOG_FILE, 'a') as log_file:
-            log_file.write("{}: {} event received\n".format(event_time, EVENT_TO_TRACK))
+    start_time = time.time()
+    response = send_command(ami_socket, originate_cmd)
+    if response is None or "Response: Error" in response:
+        print(f"Error sending originate command: {response}")
+        return False
 
-    time.sleep(1)  # Adjust the sleep duration as needed
+    while True:
+        response = ami_socket.recv(4096).decode()
+        if EVENT_TO_TRACK in response:
+            wait_time = time.time() - start_time
+            print(f"Call originated for DID {did} with wait time: {wait_time:.2f} seconds")
+            return True
 
-# Close the socket connection
-ami_socket.close()
+
+def main():
+    while True:
+        ami_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        retry_delay = 1  # delay
+
+        try:
+            ami_socket.connect((AMI_HOST, AMI_PORT))
+
+            login_command = "Action: Login\r\nUsername: {}\r\nSecret: {}\r\n\r\n".format(AMI_USERNAME, AMI_PASSWORD)
+            response = send_command(ami_socket, login_command)
+
+            print(f"AMI initial response: {response}")
+
+            while True:
+                response = ami_socket.recv(4096).decode()
+                print(f"AMI login response: {response}")
+                if "Response: Success" in response:
+                    break
+                elif "Response: Error" in response:
+                    print(f"Login error: {response}")
+                    return
+
+            while True:
+                active_calls_count = get_active_calls_count(ami_socket)
+                if active_calls_count is None:
+                    print("Failed to retrieve active calls count.")
+                    break
+
+                if active_calls_count < 80:
+                    call_result = originate_call(DID_TO_CALL, ami_socket)
+                    if not call_result:
+                        break
+                else:
+                    print(f"There are already {active_calls_count} or more connected calls. Waiting before next check.")
+                
+                time.sleep(0)
+
+        except (OSError, socket.error) as e:
+            print(f"Error in main loop: {e}")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)  # Max delay Exp backoff
+
+        finally:
+            ami_socket.close()
+
+
+if __name__ == "__main__":
+    main()
